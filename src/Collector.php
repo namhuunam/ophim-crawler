@@ -33,6 +33,13 @@ class Collector
         
         // Sau đó xử lý poster
         $processedPosterUrl = $this->getPosterImage($info['slug'], $posterUrl, $processedThumbUrl);
+        
+        // Kiểm tra lại: Nếu thumb vẫn là URL gốc (có lỗi) và poster đã xử lý thành công (là đường dẫn local)
+        // thì sử dụng poster cho thumb
+        if ($processedThumbUrl === $thumbUrl && strpos($processedPosterUrl, '/storage/') === 0) {
+            Log::info("Sử dụng ảnh poster cho thumb của {$info['slug']} vì thumb gốc bị lỗi");
+            $processedThumbUrl = $processedPosterUrl;
+        }
 
         $data = [
             'name' => $info['name'],
@@ -202,7 +209,7 @@ class Collector
             // Chuyển đổi sang định dạng WebP nếu tùy chọn được bật
             if (Option::get('convert_to_webp', false)) {
                 // Mặc định chất lượng nén WebP là 80%
-                $img->encode('webp', 80);
+                $img->encode('webp', 85);
             }
 
             $img->save(storage_path("app/public/" . $path));
