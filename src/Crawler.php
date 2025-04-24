@@ -16,7 +16,29 @@ class Crawler extends BaseCrawler
 {
     public function handle()
     {
-        $payload = json_decode($body = file_get_contents($this->link), true);
+        // Mã hóa URL nếu chứa ký tự Unicode
+        $encodedUrl = $this->encodeUrl($this->link);
+        
+        // Sử dụng cURL thay vì file_get_contents để xử lý tốt hơn các URL có ký tự Unicode
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $encodedUrl);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36");
+        $body = curl_exec($ch);
+        
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        if ($httpCode !== 200) {
+            throw new \Exception("Không thể tải dữ liệu từ API. HTTP code: $httpCode, URL: $encodedUrl");
+        }
+        
+        curl_close($ch);
+        
+        $payload = json_decode($body, true);
+        
+        if (!$payload || !isset($payload['movie'])) {
+            throw new \Exception("Dữ liệu API không hợp lệ hoặc không có thông tin phim");
+        }
 
         $this->checkIsInExcludedList($payload);
 
@@ -77,6 +99,54 @@ class Crawler extends BaseCrawler
         $this->updateEpisodes($movie, $payload);
     }
 
+    /**
+     * Mã hóa URL có chứa ký tự Unicode
+     */
+    protected function encodeUrl(string $url): string
+    {
+        $parts = parse_url($url);
+        if (!isset($parts['path'])) {
+            return $url;
+        }
+        
+        // Tách đường dẫn thành các phần
+        $pathSegments = explode('/', $parts['path']);
+        
+        // Mã hóa từng phần (trừ phần đầu tiên là empty do đường dẫn bắt đầu bằng /)
+        foreach ($pathSegments as $i => $segment) {
+            if ($segment === '') continue;
+            
+            // Chỉ mã hóa nếu có ký tự không phải ASCII
+            if (preg_match('/[^\x20-\x7f]/', $segment)) {
+                $pathSegments[$i] = rawurlencode($segment);
+            }
+        }
+        
+        // Tái tạo đường dẫn
+        $encodedPath = implode('/', $pathSegments);
+        
+        // Tái tạo URL
+        $result = '';
+        if (isset($parts['scheme'])) {
+            $result .= $parts['scheme'] . '://';
+        }
+        if (isset($parts['host'])) {
+            $result .= $parts['host'];
+        }
+        if (isset($parts['port'])) {
+            $result .= ':' . $parts['port'];
+        }
+        $result .= $encodedPath;
+        if (isset($parts['query'])) {
+            $result .= '?' . $parts['query'];
+        }
+        if (isset($parts['fragment'])) {
+            $result .= '#' . $parts['fragment'];
+        }
+        
+        return $result;
+    }
+
     protected function hasChange(?Movie $movie, $checksum)
     {
         return is_null($movie) || ($movie->update_checksum != $checksum);
@@ -107,9 +177,47 @@ class Crawler extends BaseCrawler
         $actors = [];
         foreach ($payload['movie']['actor'] as $actor) {
             if (!trim($actor)) continue;
-            $actors[] = Actor::firstOrCreate(['name' => trim($actor)])->id;
+            
+            try {
+                // Tìm diễn viên theo tên chuẩn hóa để tránh trùng lặp
+                $normalizedName = $this->normalizeActorName(trim($actor));
+                $actorModel = Actor::firstOrCreate(
+                    ['name' => $normalizedName],
+                    [
+                        'name' => trim($actor), // Giữ tên hiển thị gốc
+                        'slug' => Str::slug($normalizedName . '-' . time()) // Thêm timestamp để đảm bảo slug độc nhất
+                    ]
+                );
+                
+                $actors[] = $actorModel->id;
+            } catch (\Exception $e) {
+                // Log lỗi nhưng không dừng quá trình
+                \Log::error("Lỗi khi đồng bộ diễn viên: {$e->getMessage()}, Diễn viên: {$actor}");
+                continue;
+            }
         }
-        $movie->actors()->sync($actors);
+        
+        // Đồng bộ diễn viên với phim
+        if (!empty($actors)) {
+            $movie->actors()->sync($actors);
+        }
+    }
+    
+    /**
+     * Chuẩn hóa tên diễn viên để tránh trùng lặp
+     */
+    protected function normalizeActorName(string $name): string
+    {
+        // Loại bỏ các khoảng trắng thừa và chuyển về chữ thường
+        $normalized = mb_strtolower(trim($name));
+        
+        // Loại bỏ dấu câu, dấu ngoặc, và các ký tự đặc biệt
+        $normalized = preg_replace('/[^\p{L}\p{N}\s]/u', '', $normalized);
+        
+        // Thay thế nhiều khoảng trắng bằng một khoảng trắng
+        $normalized = preg_replace('/\s+/', ' ', $normalized);
+        
+        return trim($normalized);
     }
 
     protected function syncDirectors($movie, array $payload)
