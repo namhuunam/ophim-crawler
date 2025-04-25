@@ -179,17 +179,37 @@ class Crawler extends BaseCrawler
             if (!trim($actor)) continue;
             
             try {
-                // Tìm diễn viên theo tên chuẩn hóa để tránh trùng lặp
+                // Tìm diễn viên hiện có theo tên
                 $normalizedName = $this->normalizeActorName(trim($actor));
-                $actorModel = Actor::firstOrCreate(
-                    ['name' => $normalizedName],
-                    [
-                        'name' => trim($actor), // Giữ tên hiển thị gốc
-                        'slug' => Str::slug($normalizedName . '-' . time()) // Thêm timestamp để đảm bảo slug độc nhất
-                    ]
-                );
+                $actorName = trim($actor);
                 
-                $actors[] = $actorModel->id;
+                $existingActor = Actor::where('name', $actorName)
+                    ->orWhere('name', $normalizedName)
+                    ->first();
+                
+                if ($existingActor) {
+                    // Nếu tìm thấy diễn viên, sử dụng bản ghi đó
+                    $actors[] = $existingActor->id;
+                } else {
+                    // Cố gắng tạo bản ghi mới bằng cách sử dụng hàm DB::raw để tránh Laravel tự tạo MD5
+                    try {
+                        // Tạo slug độc nhất bằng cách thêm timestamp
+                        $slug = Str::slug($normalizedName . '-' . time() . '-' . rand(1000, 9999));
+                        
+                        // Sử dụng SQL thuần để tránh việc tự động tạo MD5 của Laravel
+                        $newActor = new Actor();
+                        $newActor->name = $actorName;
+                        $newActor->slug = $slug;
+                        // Đặt name_md5 thành NULL hoặc một giá trị ngẫu nhiên độc nhất
+                        $newActor->name_md5 = md5($actorName . $slug . uniqid());
+                        $newActor->save();
+                        
+                        $actors[] = $newActor->id;
+                    } catch (\Exception $ex) {
+                        // Nếu vẫn gặp lỗi, ghi log và bỏ qua
+                        \Log::warning("Không thể tạo diễn viên mới: {$ex->getMessage()}, Diễn viên: {$actorName}");
+                    }
+                }
             } catch (\Exception $e) {
                 // Log lỗi nhưng không dừng quá trình
                 \Log::error("Lỗi khi đồng bộ diễn viên: {$e->getMessage()}, Diễn viên: {$actor}");
