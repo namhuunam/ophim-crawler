@@ -42,9 +42,28 @@ class Crawler extends BaseCrawler
 
         $this->checkIsInExcludedList($payload);
 
-        $movie = Movie::where('update_handler', static::class)
+        // Tìm phim hiện có trong database dựa trên _id hoặc slug
+        $movieByIdentity = Movie::where('update_handler', static::class)
             ->where('update_identity', $payload['movie']['_id'])
             ->first();
+            
+        $movieBySlug = Movie::where('slug', $payload['movie']['slug'])->first();
+        
+        // Xác định movie sẽ sử dụng
+        $movie = null;
+        
+        if ($movieByIdentity) {
+            // Nếu tìm thấy theo _id, sử dụng bản ghi đó
+            $movie = $movieByIdentity;
+        } elseif ($movieBySlug) {
+            // Nếu tìm thấy theo slug, cập nhật _id mới vào bản ghi hiện có
+            $movie = $movieBySlug;
+            $movie->update_identity = $payload['movie']['_id'];
+            $movie->update_handler = static::class;
+            $movie->save();
+            
+            \Log::info("Cập nhật ID mới cho phim {$payload['movie']['name']} từ API khác. Slug: {$payload['movie']['slug']}, ID mới: {$payload['movie']['_id']}");
+        }
 
         if (!$this->hasChange($movie, md5($body)) && $this->forceUpdate == false) {
             return false;
@@ -76,9 +95,35 @@ class Crawler extends BaseCrawler
         }
 
         if ($movie) {
+            // Lưu lại nội dung đã chỉnh sửa thủ công (nếu có)
+            $preservedContent = null;
+            
+            // Kiểm tra xem nội dung hiện tại có khác với nội dung từ API không
+            // Và kiểm tra xem nội dung có nằm trong các trường cần cập nhật không
+            if (in_array('content', $this->fields) && !empty($movie->content)) {
+                $apiContent = $info['content'] ?? '';
+                
+                // Nếu nội dung hiện tại khác nội dung API và độ dài đủ lớn
+                // (cho thấy có thể đã được chỉnh sửa thủ công)
+                if ($movie->content !== $apiContent && strlen($movie->content) > 100) {
+                    \Log::info("Giữ nguyên nội dung đã chỉnh sửa thủ công cho phim: {$movie->name} ({$movie->slug})");
+                    $preservedContent = $movie->content;
+                }
+            }
+            
             // Cập nhật movie với thời gian từ API
             $movie->updated_at = $updated_at;
-            $movie->update(collect($info)->only($this->fields)->merge(['update_checksum' => md5($body)])->toArray());
+            
+            // Chuẩn bị dữ liệu cập nhật
+            $updateData = collect($info)->only($this->fields)->merge(['update_checksum' => md5($body)])->toArray();
+            
+            // Khôi phục nội dung đã chỉnh sửa thủ công (nếu có)
+            if ($preservedContent !== null) {
+                $updateData['content'] = $preservedContent;
+            }
+            
+            // Thực hiện cập nhật
+            $movie->update($updateData);
         } else {
             // Tạo movie mới với thời gian từ API
             $movie = Movie::create(array_merge($info, [
